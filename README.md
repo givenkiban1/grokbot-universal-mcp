@@ -1,160 +1,229 @@
 # grok-bot-universal
 
-An MCP server that lets Claude send messages to your GrokBot bots.
+A self-hosted, two-way bridge between Claude and your GrokBot bots.
 
-**Direction for now: Claude → GrokBot only.** Claude calls `send_to_grokbot`, and the server POSTs to the bot's
-webhook routine, which wakes the bot with your message. The bot's answer does not come back through this server yet
-(see [Later](#later)).
+- **Claude → bot:** Claude briefs a bot (`send_to_grokbot`); the server wakes the bot's webhook routine.
+- **Bot → Claude:** the bot answers into the same thread (one `curl`); Claude picks it up with `wait_for_reply`
+  or `check_inbox`, and you can get a push notification.
+- **Dashboard:** sign in, add bots and their webhook keys (kept encrypted on the server), connect Claude, read
+  threads, manage tokens, 2FA and users.
 
-## What's in the box
+It works in every Claude app: claude.ai, Desktop and mobile through a custom connector (OAuth sign-in), and Claude
+Code through the same connector or an API token.
 
-| Piece | Where | Works in |
-|---|---|---|
-| MCP server (tools + standing rules) | `src/` | Every Claude app that connects to it |
-| `grokbot-delegation` skill (how to brief a bot well) | `skills/grokbot-delegation/` | Claude Code (installed); Desktop/claude.ai via upload |
-| GrokBot routine instructions | [`grokbot/routine-instructions.md`](grokbot/routine-instructions.md) | Paste into each bot's webhook routine |
+```
+ Claude (web/desktop/mobile/Code)                       GrokBot bot
+        │  MCP over HTTPS (OAuth or API token)              ▲   │
+        ▼                                                   │   │ POST /api/v1/replies
+ ┌──────────────── Cloudflare Tunnel ─────────────────┐     │   │ (thread token)
+ │ app: /mcp  /authorize /token  /api/v1  dashboard   │─────┘   │
+ │      webhook call with brief + reply token         │◀────────┘
+ │ Postgres (internal network, no internet)           │
+ └────────────────────────────────────────────────────┘
+```
 
-### Tools
+## Contents
+
+| Piece | Where |
+|---|---|
+| Server (Express + MCP SDK, Node 24, runs the TypeScript directly) | `src/` |
+| Database migrations | `src/migrations/` |
+| Deployment | `Dockerfile`, `docker-compose.yml`, `.env.example`, `scripts/` |
+| `grokbot-delegation` skill (how Claude briefs bots and handles replies) | `skills/grokbot-delegation/` |
+| Routine instructions for the bots | shown per bot in the dashboard; reference copy in [`grokbot/routine-instructions.md`](grokbot/routine-instructions.md) |
+| End-to-end test | `test/e2e.ts` |
+
+## Deploy
+
+You need a Linux server with Docker, and a domain on Cloudflare. The server needs no open inbound ports: the
+Cloudflare Tunnel connects outwards.
+
+1. **Cloudflare tunnel.** Zero Trust → Networks → Tunnels → Create a tunnel (Cloudflared). Copy the token from the
+   Docker install command. Add a **public hostname**, e.g. `grokbot.example.com` → service `HTTP` → `app:8787`.
+2. **Get the code onto the server** and create the environment file:
+   ```bash
+   ./scripts/init-env.sh https://grokbot.example.com
+   ```
+   Then edit `.env`: paste `CLOUDFLARE_TUNNEL_TOKEN`, and check `WEBHOOK_HOSTS` (defaults to `api2.cursor.sh`, where
+   GrokBot webhooks live). **Save `ENCRYPTION_KEY` in your password manager**: backups can't be restored without it.
+3. **Start it:**
+   ```bash
+   docker compose --profile tunnel up -d --build
+   ```
+4. **Create your admin account:**
+   ```bash
+   docker compose exec app node src/cli.ts invite --admin
+   ```
+   Open the printed link, sign up, then turn on two-factor under **Settings**.
+
+Recommended Cloudflare settings: SSL/TLS **Full**, **Always Use HTTPS**, and a WAF rate-limiting rule on
+`/login`. If you put Cloudflare Access in front of the dashboard, add Bypass rules for the paths machines call:
+`/mcp`, `/api/*`, `/bot/*`, `/token`, `/register`, `/revoke`, `/.well-known/*` and `/health`.
+
+### Updating
+
+```bash
+git pull && docker compose --profile tunnel up -d --build
+```
+
+Migrations run automatically at start-up.
+
+### Backups
+
+```bash
+./scripts/backup.sh          # → backups/grokbot-<time>.sql.gz, keeps the newest 14
+```
+
+Run it from cron daily. A restore needs the dump **and** the `ENCRYPTION_KEY` from `.env`.
+
+## Use
+
+### 1. Add a bot
+
+In GrokBot, open the bot and create a routine with a **Webhook** trigger. In the dashboard: **Bots → Add bot**, then
+paste the webhook URL and key, and describe what the bot is for (`use for` / `not for` drive which bot Claude
+picks; `projects` makes it the default for matching folders, `afs-*` style).
+
+Then copy the bot's **Routine instructions** (on its page) into the routine. They tell the bot how to read Claude's
+brief and how to reply.
+
+### 2. Connect Claude
+
+On **Connect Claude**:
+
+- **claude.ai, Desktop, mobile:** Settings → Connectors → Add custom connector → paste `https://<host>/mcp` →
+  Connect → sign in and approve. It then works in all your Claude apps.
+- **Claude Code:** create an API token and run the command the page shows:
+  ```bash
+  claude mcp add --transport http --scope user grokbot https://grokbot.example.com/mcp --header "Authorization: Bearer gbp_…"
+  ```
+  The `grokbot-delegation` skill is linked into `~/.claude/skills`. For Desktop/claude.ai chats, upload
+  `dist/grokbot-delegation.zip` under Settings → Capabilities → Skills (rebuild it after editing the skill:
+  `cd skills && rm -f ../dist/grokbot-delegation.zip && zip -qr ../dist/grokbot-delegation.zip grokbot-delegation`).
+
+### 3. Talk to bots
+
+Ask Claude: "have the research bot compare these three vendors and wait for the answer". Claude picks the bot, shows
+you the brief, sends it only after your yes, and waits for the reply. Later: "any replies from my bots?".
+
+### MCP tools
 
 | Tool | What it does |
 |---|---|
-| `list_grokbots` | Lists your bots with what each is for and not for, and marks ★ the default for the current project |
-| `send_to_grokbot` | `bot`, `message`, optional `about`, `project`, `thread_id`. Wakes the bot. **Every send must be confirmed** |
-| `list_sent` | Recent sends (optionally per `bot` or `thread_id`) with delivery status, to continue a thread from another chat |
+| `list_grokbots` | Bots with use for / not for, ★ project default, ✉ unread replies |
+| `send_to_grokbot` | `bot`, `message`, `about`, `project`, `thread_id`, `user_confirmed`. Every send needs your confirmation |
+| `wait_for_reply` | Waits up to `timeout_seconds` (≤ 300) for a reply on a thread |
+| `check_inbox` | Unread replies (all bots or one), marks them read |
+| `get_thread` | A whole conversation |
+| `list_threads` | Recent threads with unread counts |
 
-### Standing rules
-
-The server sends these to every Claude app on connect:
-- Pick the bot from its `use_for` / `not_for` / `projects`, and ask the user when unsure.
-- Always confirm before every send.
-- Write a brief the bot can follow without seeing the chat.
-- Never send secrets.
-
-### Confirmation on every send
-
-Every send is confirmed in one of two ways:
-- **Apps that support MCP confirmation dialogs** (elicitation): the server itself shows a "Send to *bot*?" dialog
-  with the message. Nothing goes out unless you tick Send. Claude can't skip this.
-- **Other apps, and the hosted HTTP mode:** the tool refuses to send unless Claude passes `user_confirmed: true`.
-  The rules and the skill require Claude to show you the exact message and wait for your yes first.
+Confirmation: in apps that support MCP dialogs (Claude Code), the server asks you directly; elsewhere the tool
+refuses unless Claude passes `user_confirmed: true`, which the rules and skill only allow after your explicit yes.
 
 ### What the bot receives
 
 ```json
 {
   "source": "claude",
-  "from": { "agent": "Claude", "app": "Claude Code", "project": "grok-bot-universal", "machine": "givens-macbook-pro", "about": "…" },
+  "from": { "agent": "Claude", "app": "Claude Code", "project": "grok-bot-universal", "about": "…" },
   "thread_id": "…",
   "message": "…",
-  "sent_at": "2026-10-27T18:30:00.000Z"
+  "sent_at": "2026-10-27T18:30:00.000Z",
+  "reply": { "url": "https://<host>/api/v1/replies", "token": "gbt_…", "expires_in_days": 14, "how": "…", "mcp_url": "https://<host>/bot/mcp" }
 }
 ```
 
-`from` is filled in automatically:
-- **app:** from the connecting client.
-- **project:** from the folder Claude Code runs in, or from Claude when it passes `project`.
-- **about:** a one-liner Claude writes.
+The bot replies with `POST reply.url` `{"message": "…", "state": "done" | "working" | "needs_input" | "failed"}` and
+`Authorization: Bearer <reply.token>`. See [`grokbot/routine-instructions.md`](grokbot/routine-instructions.md) for
+the long-lived bot token and the bot MCP endpoint.
 
-A success only means the routine started. It does not mean the bot finished.
+### Reply notifications
 
-## Setup
+Settings → Reply notifications: an HTTPS URL that gets
+`{"event":"bot_reply","bot","thread_id","state","preview","url"}` whenever a bot replies (ntfy, a Slack/Discord
+relay, a Claude routine trigger, …), with an optional bearer secret.
 
-### 1. In GrokBot (once per bot)
+## Security
 
-1. Open the bot and create a routine with a **Webhook** trigger.
-2. Paste the instruction from [`grokbot/routine-instructions.md`](grokbot/routine-instructions.md) and fill in the
-   bot's specialty.
-3. Copy the routine's **webhook URL** and **key** (`crsr_…`).
+| Area | How |
+|---|---|
+| Accounts | Invite-only sign-up by default; scrypt passwords (12+ chars); optional TOTP 2FA with replay protection; per-IP and per-account login throttling |
+| Sessions | Random token in an `HttpOnly`, `SameSite=Lax`, `Secure` `__Host-` cookie; only its hash is stored; 7-day lifetime, 12-hour idle timeout; new token at login and after 2FA |
+| CSRF / clickjacking | Per-session CSRF token on every form, same-origin check on every POST, strict CSP with no inline script, `frame-ancestors 'none'` |
+| Secrets at rest | Bot webhook keys, TOTP seeds, notify secrets and OAuth client secrets are AES-256-GCM encrypted, each bound to its owner row. API, reply, OAuth and session tokens are stored only as SHA-256 hashes and shown once |
+| Claude access | OAuth 2.1 with PKCE, dynamic registration limited to Claude's redirect hosts, single-use 5-minute codes, 1-hour access tokens, rotating 30-day refresh tokens with reuse detection; or revocable, expiring API tokens. MCP sessions are bound to their user |
+| Bot access | Per-thread reply tokens (HMAC-signed, 14 days, one thread only) or a long-lived per-bot token; rotating it invalidates all thread tokens |
+| Isolation | Every query is scoped to the signed-in user; the test suite checks cross-user access |
+| Outbound requests | Webhook and notify URLs must be HTTPS, may be limited to `WEBHOOK_HOSTS`, and can't reach private, loopback or metadata addresses (checked on the resolved IP, so DNS rebinding doesn't help); no redirects; 15 s timeout |
+| Outgoing messages | Messages containing keys, tokens or private keys (including your own bot keys) are refused and logged |
+| Prompt injection | Bot replies reach Claude fenced and labelled as untrusted; the server rules and skill tell Claude never to act on instructions in them |
+| Abuse | Rate limits on login, sign-up, OAuth registration, MCP and the reply API; DNS-rebinding host check; request size limits |
+| Containers | App runs as non-root, read-only filesystem, all capabilities dropped; Postgres has no network route out; nothing listens publicly (Cloudflare Tunnel) |
+| Audit | Sign-ins, failures, token, bot and 2FA changes, blocked sends: **Activity** page |
 
-### 2. In this folder
+## Admin CLI
 
-Edit `bots.json` (gitignored, so your keys stay out of git). See [`bots.example.json`](bots.example.json):
+Run on the server (`docker compose exec app node src/cli.ts …`):
 
-```json
-{
-  "bots": [
-    {
-      "name": "research",
-      "description": "Research bot: digs into topics and writes summaries",
-      "use_for": ["market and competitor research", "tool and vendor comparisons"],
-      "not_for": ["writing or changing code"],
-      "projects": [],
-      "webhook_url": "https://api2.cursor.sh/automations/webhook/…",
-      "key": "crsr_…"
-    }
-  ]
-}
-```
+| Command | Does |
+|---|---|
+| `invite [--admin] [--days N] [--note TEXT]` | One-time sign-up link |
+| `import --email E --bots bots.json [--db data/grokbot.db]` | Import bots (and old local history) into an account |
+| `reset-2fa --email E` | Turn off 2FA for someone who lost their device |
+| `disable --email E` / `enable --email E` | Lock/unlock an account (disabling revokes all its sessions and tokens) |
 
-- `name`: lowercase; it's what you call the bot in Claude.
-- `use_for` / `not_for`: what Claude matches your task against. Be specific.
-- `projects`: folder names this bot is the default for. A trailing `*` matches a prefix, e.g. `"afs-*"`.
+Admins can also create invites and disable users under **Admin** in the dashboard.
 
-Changes apply on the next call, with no restart.
+## Configuration
 
-### 3. Connect Claude
+| Variable | Default | |
+|---|---|---|
+| `PUBLIC_URL` | required | The address people and Claude use, e.g. `https://grokbot.example.com` |
+| `ENCRYPTION_KEY` | required | 32 bytes base64 (`openssl rand -base64 32`) |
+| `DATABASE_URL` | set by compose | Postgres connection string |
+| `SIGNUP` | `invite` | `open` lets anyone who reaches the server sign up |
+| `WEBHOOK_HOSTS` | any public host | Comma-separated allowlist, `*.example.com` supported |
+| `BEHIND_CLOUDFLARE` | `false` | Use `CF-Connecting-IP` as the client IP (only from a proxy on the private network) |
+| `TRUST_PROXY` | `loopback, uniquelocal` | Express trust-proxy setting |
+| `OAUTH_REDIRECT_HOSTS` | `claude.ai,claude.com,localhost,127.0.0.1` | Where OAuth clients may redirect |
+| `ALLOW_PRIVATE_WEBHOOKS` | `false` | Development only: allow `http://` and private webhook addresses |
 
-**Claude Code**: registered for all projects as `grokbot` (`claude mcp get grokbot`). The skill is installed at
-`~/.claude/skills/grokbot-delegation`, a link to `skills/grokbot-delegation`, so edits here apply immediately.
+## Migrating from the local version
 
-**Claude Desktop**: `grokbot` is in `~/Library/Application Support/Claude/claude_desktop_config.json`, and a
-backup of the previous config sits next to it as `.bak-grokbot`. Quit and reopen Desktop to load changes. For the
-skill in Desktop chats, upload `dist/grokbot-delegation.zip` under Settings → Capabilities → Skills. If you edit
-the skill, rebuild the zip:
+Version 0.2 (tag `v0.2-local`) ran on your Mac over stdio with `bots.json` and SQLite. After deploying:
 
 ```bash
-cd skills && rm -f ../dist/grokbot-delegation.zip && zip -qr ../dist/grokbot-delegation.zip grokbot-delegation
+# on the server, in this folder, after copying bots.json and data/grokbot.db over (and signing up)
+docker compose run --rm -v "$PWD/bots.json:/import/bots.json:ro" -v "$PWD/data:/import/data:ro" app \
+  node src/cli.ts import --email you@example.com --bots /import/bots.json --db /import/data/grokbot.db
 ```
 
-**Claude web and mobile**: these can't reach your Mac, so they need the hosted version (below). Uploaded skills
-sync to them from your account.
+Then point Claude Code at the server (`claude mcp remove grokbot --scope user`, then the `claude mcp add` command
+from **Connect Claude**), remove the `grokbot` entry from Claude Desktop's `claude_desktop_config.json`, and add the
+custom connector instead. Delete the local `bots.json` once imported: its keys are now encrypted on the server.
 
-> The node path in both registrations is your nvm Node 24. If you remove that version, update the path (needs
-> Node ≥ 22.18, which runs `.ts` directly). If you move this folder, both registrations need the new path.
+## Development
 
-## Run modes
+```bash
+docker run -d --name grokbot-testdb -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17-alpine
+npm install
+npm run typecheck
+TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres npm test
+```
 
-| Command | Use |
-|---|---|
-| `npm start` | stdio (what Claude Code and Desktop launch automatically; you don't run this yourself) |
-| `npm run start:http` | Streamable HTTP at `http://127.0.0.1:8787/mcp`, used for hosting |
-| `npm test` | End-to-end test against a fake GrokBot webhook (stdio, confirmation dialog, HTTP, SQLite incl. parallel writers) |
+The test creates and drops its own database, runs the server against a fake GrokBot webhook, and drives the
+dashboard, Claude's MCP (API token, OAuth, confirmation dialog) and the bot reply API.
 
-### Storage
-
-Every send attempt, successful or not, is stored in SQLite at `data/grokbot.db`. This uses Node's built-in
-`node:sqlite`, so there's no extra dependency. `data/` is gitignored, and keys are never stored.
-
-| Table | Columns |
-|---|---|
-| `threads` | `id`, `bot`, `created_at`, `updated_at` |
-| `messages` | `thread_id`, `bot`, `direction` (`to_bot`; `from_bot` reserved for replies), `body`, `sender` (the `from` JSON), `status` (HTTP; 0 = no response), `run_id`, `error`, `created_at` |
-
-- WAL mode lets Claude Desktop and several Claude Code sessions (each runs its own server process) write at once.
-- Schema changes are numbered migrations tracked in `PRAGMA user_version` (`src/store.ts`).
-- A `data/sent.jsonl` from before the switch is imported once and renamed `sent.jsonl.imported`.
-- To back it up, copy `data/grokbot.db` while no Claude app is running, or use `sqlite3 data/grokbot.db ".backup backup.db"`.
-
-`list_sent` reads from it. Filter by `bot` or `thread_id`.
-
-HTTP mode environment variables: `PORT` (8787), `HOST` (127.0.0.1), and `MCP_AUTH_TOKEN`. When set, clients must
-send `Authorization: Bearer <token>`. The server refuses to bind a public interface without a token.
-
-## Later
-
-- **Hosting**: run `npm run start:http` on your server behind HTTPS (Caddy, nginx, or Tailscale Funnel), with
-  `HOST=0.0.0.0` and `MCP_AUTH_TOKEN` set. Then add `https://your-host/mcp` as a custom connector in Claude.
-  HTTP mode is stateless, so the server-side confirmation dialog is off there and the `user_confirmed` rule
-  applies. Switching to stateful sessions would bring the dialog back.
-- **Replies (GrokBot → Claude)**: add an inbox to this server and give GrokBot tools such as `reply_to_claude` via
-  an MCP connector, and/or have GrokBot fire a Claude Code routine through its API trigger. The `thread_id` sent
-  today is what ties replies to conversations.
+To run locally: `DATABASE_URL=… PUBLIC_URL=http://127.0.0.1:8787 ENCRYPTION_KEY=… npm start`.
 
 ## Troubleshooting
 
-| Error | Meaning |
+| Symptom | Meaning |
 |---|---|
-| `HTTP 401 … Check the key` | Wrong `key` in `bots.json` |
+| `HTTP 401 … webhook key` | Wrong key saved for the bot; re-enter it on the bot's page |
 | `HTTP 400 … paused or disabled` | The routine is paused. GrokBot drops (doesn't queue) messages sent while paused |
-| `No bot config at …` | `bots.json` is missing |
 | `Not sent. Confirmation is required` | Claude tried to send without your yes; it should show you the message first |
+| `Not sent: the message appears to contain …` | The secret blocker caught a key or token in the brief |
+| Bot's reply gets `401` | The thread token expired (14 days) or the bot's reply token was rotated |
+| `421 Misdirected request` | `PUBLIC_URL` doesn't match the hostname you're using |
+| Connector won't connect | Check `PUBLIC_URL` is the exact public `https://` address, and the tunnel's public hostname points to `app:8787` |
