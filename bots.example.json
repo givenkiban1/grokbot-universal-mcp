@@ -1,0 +1,22 @@
+{
+  "bots": [
+    {
+      "name": "research",
+      "description": "Research bot: digs into topics and writes summaries",
+      "use_for": ["market and competitor research", "finding and summarising sources", "tool and vendor comparisons"],
+      "not_for": ["writing or changing code", "anything with client financial data"],
+      "projects": [],
+      "webhook_url": "https://api2.cursor.sh/automations/webhook/YOUR-ROUTINE-ID",
+      "key": "crsr_YOUR_WEBHOOK_KEY"
+    },
+    {
+      "name": "finance",
+      "description": "Finance bot: AFS and accounting support",
+      "use_for": ["AFS drafting checks", "disclosure research", "reconciliation follow-ups"],
+      "not_for": ["general web research"],
+      "projects": ["afs-*", "AFS-AI-Agent"],
+      "webhook_url": "https://api2.cursor.sh/automations/webhook/YOUR-OTHER-ROUTINE-ID",
+      "key": "crsr_YOUR_OTHER_WEBHOOK_KEY"
+    }
+  ]
+}

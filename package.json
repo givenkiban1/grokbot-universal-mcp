@@ -1,0 +1,20 @@
+{
+  "name": "grok-bot-universal",
+  "version": "0.2.0",
+  "private": true,
+  "description": "MCP server that lets Claude send messages to GrokBot bots via their webhook routines.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/stdio.ts",
+    "start:http": "node src/http.ts",
+    "test": "node test/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "express": "^5.3.0",
+    "zod": "^4.6.7"
+  }
+}
