@@ -79,7 +79,7 @@ export function createMcpServer(ctx: SessionContext): McpServer {
 
   // "yes"/"no" when the user answered a client dialog, "unavailable" when we rely on Claude having asked.
   async function askUser(bot: Bot, message: string, threadId: string | undefined): Promise<"yes" | "no" | "unavailable"> {
-    if (!server.server.getClientCapabilities()?.elicitation?.form && !server.server.getClientCapabilities()?.elicitation) return "unavailable";
+    if (!server.server.getClientCapabilities()?.elicitation) return "unavailable";
     const preview = message.length > 1500 ? message.slice(0, 1500) + "\n…" : message;
     try {
       const r = await server.server.elicitInput(
