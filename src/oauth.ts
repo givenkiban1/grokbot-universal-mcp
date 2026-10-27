@@ -110,6 +110,27 @@ async function issueTokens(db: any, grantId: string, clientId: string, userId: s
   return { access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL_S, refresh_token: refresh, scope: scopes.join(" ") };
 }
 
+async function rotateRefreshToken(
+  client: OAuthClientInformationFull, refreshToken: string, resource: URL | undefined, onReuse: (grantId: string) => void,
+): Promise<OAuthTokens> {
+  return tx(async (db) => {
+    const row = await one<{ grant_id: string; user_id: string; scopes: string[]; resource: string | null; revoked_at: Date | null; expires_at: Date }>(
+      `SELECT t.grant_id, t.user_id, t.scopes, t.resource, t.revoked_at, t.expires_at FROM oauth_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.token_hash = $1 AND t.kind = 'refresh' AND t.client_id = $2 AND u.disabled_at IS NULL FOR UPDATE OF t`,
+      [hashToken(refreshToken), client.client_id], db);
+    if (!row) throw new InvalidGrantError("Invalid refresh token");
+    if (row.revoked_at) {
+      // A rotated-out refresh token came back: someone has a copy. The caller kills the whole grant.
+      onReuse(row.grant_id);
+      throw new InvalidGrantError("Refresh token was already used");
+    }
+    if (row.expires_at < new Date()) throw new InvalidGrantError("Refresh token expired");
+    if (resource && row.resource && resource.href !== row.resource) throw new InvalidGrantError("resource does not match");
+    await q("UPDATE oauth_tokens SET revoked_at = now() WHERE token_hash = $1", [hashToken(refreshToken)], db);
+    return issueTokens(db, row.grant_id, client.client_id, row.user_id, row.scopes, row.resource);
+  });
+}
+
 export const oauthProvider: OAuthServerProvider = {
   clientsStore,
 
@@ -153,23 +174,16 @@ export const oauthProvider: OAuthServerProvider = {
   },
 
   async exchangeRefreshToken(client, refreshToken, _scopes, resource) {
-    return tx(async (db) => {
-      const row = await one<{ grant_id: string; user_id: string; scopes: string[]; resource: string | null; revoked_at: Date | null; expires_at: Date }>(
-        `SELECT t.grant_id, t.user_id, t.scopes, t.resource, t.revoked_at, t.expires_at FROM oauth_tokens t JOIN users u ON u.id = t.user_id
-         WHERE t.token_hash = $1 AND t.kind = 'refresh' AND t.client_id = $2 AND u.disabled_at IS NULL FOR UPDATE OF t`,
-        [hashToken(refreshToken), client.client_id], db);
-      if (!row) throw new InvalidGrantError("Invalid refresh token");
-      if (row.revoked_at) {
-        // A rotated-out refresh token came back: someone has a copy. Kill the whole grant.
-        await q("UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL", [row.grant_id], db);
-        throw new InvalidGrantError("Refresh token was already used");
-      }
-      if (row.expires_at < new Date()) throw new InvalidGrantError("Refresh token expired");
-      if (resource && row.resource && resource.href !== row.resource) throw new InvalidGrantError("resource does not match");
-      await q("UPDATE oauth_tokens SET revoked_at = now() WHERE token_hash = $1", [hashToken(refreshToken)], db);
-      return issueTokens(db, row.grant_id, client.client_id, row.user_id, row.scopes, row.resource);
-    });
+    let reusedGrant: string | undefined;
+    try {
+      return await rotateRefreshToken(client, refreshToken, resource, (grant) => { reusedGrant = grant; });
+    } finally {
+      // Outside the transaction, which rolls back when the exchange fails.
+      if (reusedGrant) await q("UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL", [reusedGrant]);
+    }
   },
+
+
 
   // Accepts both connector access tokens and personal API tokens, so /mcp has one auth path.
   async verifyAccessToken(token: string): Promise<AuthInfo> {
