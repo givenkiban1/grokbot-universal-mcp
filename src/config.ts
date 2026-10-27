@@ -1,42 +1,55 @@
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+// Server configuration, read once from the environment at startup. Fails fast on anything missing or malformed.
 import { z } from "zod";
 
-export const ROOT = resolve(import.meta.dirname, "..");
+const bool = z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1");
 
-const BotSchema = z.object({
-  name: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, "use lowercase letters, numbers, - or _"),
-  description: z.string().default(""),
-  // Routing hints Claude uses to pick the right bot.
-  use_for: z.array(z.string()).default([]),
-  not_for: z.array(z.string()).default([]),
-  // Folder names this bot is the default for; a trailing * matches a prefix (e.g. "afs-*").
-  projects: z.array(z.string()).default([]),
-  webhook_url: z.url(),
-  key: z.string().min(1),
+const EnvSchema = z.object({
+  DATABASE_URL: z.string().min(1),
+  // The URL people and Claude reach this server at, e.g. https://grokbot.example.com (no trailing path).
+  PUBLIC_URL: z.url().transform((u) => u.replace(/\/+$/, "")),
+  // 32 random bytes, base64. Encrypts webhook keys and TOTP secrets, and signs reply tokens. Back it up: without it
+  // the stored keys can't be decrypted.
+  ENCRYPTION_KEY: z.string().refine((k) => Buffer.from(k, "base64").length === 32, "must be 32 bytes, base64 (openssl rand -base64 32)"),
+  PORT: z.coerce.number().int().default(8787),
+  HOST: z.string().default("0.0.0.0"),
+  // invite: an invite link is needed to sign up (default; admins create them). open: anyone can sign up.
+  SIGNUP: z.enum(["invite", "open"]).default("invite"),
+  // Express "trust proxy" setting. The default trusts loopback and private ranges, which covers a Docker network
+  // with cloudflared or another reverse proxy in front.
+  TRUST_PROXY: z.string().default("loopback, uniquelocal"),
+  // Take the client IP from Cloudflare's CF-Connecting-IP header (only honoured from a trusted proxy).
+  BEHIND_CLOUDFLARE: bool.default(false),
+  // Comma-separated host patterns bot webhooks may point at, e.g. "api2.cursor.sh,*.example.com". Empty allows any
+  // public HTTPS host.
+  WEBHOOK_HOSTS: z.string().default(""),
+  // Lets webhooks and notification URLs use http:// and private addresses. For local development and tests only.
+  ALLOW_PRIVATE_WEBHOOKS: bool.default(false),
+  // Hosts OAuth clients may redirect back to. The default covers Claude's web, desktop and mobile apps and the
+  // local callback Claude Code uses. Stops anyone registering a look-alike app that sends codes elsewhere.
+  OAUTH_REDIRECT_HOSTS: z.string().default("claude.ai,claude.com,localhost,127.0.0.1"),
 });
-export type Bot = z.infer<typeof BotSchema>;
 
-const ConfigSchema = z.object({ bots: z.array(BotSchema) });
+export type Config = z.infer<typeof EnvSchema> & {
+  secureCookies: boolean;
+  mcpUrl: string;
+  webhookHosts: string[];
+  oauthRedirectHosts: string[];
+};
 
-export function configPath(): string {
-  return process.env.GROKBOT_CONFIG ?? resolve(ROOT, "bots.json");
-}
-
-// Re-read on every call so editing bots.json takes effect without a restart.
-export function loadBots(): Bot[] {
-  const path = configPath();
-  if (!existsSync(path)) {
-    throw new Error(`No bot config at ${path}. Copy bots.example.json to bots.json and add your bot's webhook URL and key.`);
-  }
-  const parsed = ConfigSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+function load(): Config {
+  const parsed = EnvSchema.safeParse(process.env);
   if (!parsed.success) {
-    throw new Error(`Invalid ${path}: ${z.prettifyError(parsed.error)}`);
+    console.error(`Invalid configuration:\n${z.prettifyError(parsed.error)}`);
+    process.exit(1);
   }
-  return parsed.data.bots;
+  const env = parsed.data;
+  return {
+    ...env,
+    secureCookies: env.PUBLIC_URL.startsWith("https://"),
+    mcpUrl: `${env.PUBLIC_URL}/mcp`,
+    webhookHosts: env.WEBHOOK_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+    oauthRedirectHosts: env.OAUTH_REDIRECT_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+  };
 }
 
-export function matchesProject(bot: Bot, project: string | undefined): boolean {
-  if (!project) return false;
-  return bot.projects.some((p) => (p.endsWith("*") ? project.startsWith(p.slice(0, -1)) : project === p));
-}
+export const config = load();
