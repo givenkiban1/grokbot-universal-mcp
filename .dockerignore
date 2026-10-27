@@ -1,0 +1,12 @@
+node_modules
+.git
+.env
+.env.*
+data
+dist
+backups
+bots.json
+test
+skills
+grokbot
+*.md

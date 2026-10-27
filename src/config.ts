@@ -37,18 +37,20 @@ export type Config = z.infer<typeof EnvSchema> & {
 };
 
 function load(): Config {
-  const parsed = EnvSchema.safeParse(process.env);
+  // An empty variable (e.g. FOO= in .env or compose) means "use the default".
+  const env = Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== ""));
+  const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
     console.error(`Invalid configuration:\n${z.prettifyError(parsed.error)}`);
     process.exit(1);
   }
-  const env = parsed.data;
+  const data = parsed.data;
   return {
-    ...env,
-    secureCookies: env.PUBLIC_URL.startsWith("https://"),
-    mcpUrl: `${env.PUBLIC_URL}/mcp`,
-    webhookHosts: env.WEBHOOK_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
-    oauthRedirectHosts: env.OAUTH_REDIRECT_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+    ...data,
+    secureCookies: data.PUBLIC_URL.startsWith("https://"),
+    mcpUrl: `${data.PUBLIC_URL}/mcp`,
+    webhookHosts: data.WEBHOOK_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+    oauthRedirectHosts: data.OAUTH_REDIRECT_HOSTS.split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
   };
 }
 

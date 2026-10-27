@@ -3,3 +3,4 @@ bots.json
 data/
 .env
 dist/
+backups/

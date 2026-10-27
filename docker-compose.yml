@@ -1,0 +1,77 @@
+# Production stack: Postgres + the app, with Cloudflare Tunnel in front (no inbound ports on the server).
+#
+#   ./scripts/init-env.sh             # once: writes .env with fresh secrets
+#   docker compose up -d --build      # app reachable on 127.0.0.1:8787 on this host only
+#   docker compose --profile tunnel up -d   # also start cloudflared (needs CLOUDFLARE_TUNNEL_TOKEN)
+#
+# Networks: Postgres sits on an internal network with no route out. The app joins that and "edge" (for calling bot
+# webhooks); cloudflared joins "edge" and forwards the public hostname to http://app:8787.
+name: grokbot
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: grokbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: grokbot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grokbot -d grokbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: ["no-new-privileges:true"]
+
+  app:
+    build: .
+    image: grok-bot-universal:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Listed one by one (not env_file) so the tunnel token never reaches the app container.
+    environment:
+      DATABASE_URL: postgres://grokbot:${POSTGRES_PASSWORD}@db:5432/grokbot
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      BEHIND_CLOUDFLARE: ${BEHIND_CLOUDFLARE:-false}
+      SIGNUP: ${SIGNUP:-invite}
+      WEBHOOK_HOSTS: ${WEBHOOK_HOSTS:-}
+      OAUTH_REDIRECT_HOSTS: ${OAUTH_REDIRECT_HOSTS:-}
+      HOST: 0.0.0.0
+      PORT: "8787"
+    ports:
+      # Loopback only: for a local check or a reverse proxy on this host. The tunnel doesn't need it.
+      - "127.0.0.1:8787:8787"
+    networks: [internal, edge]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 200
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.0
+    profiles: [tunnel]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}  # required when the tunnel profile is on
+    depends_on: [app]
+    networks: [edge]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  pgdata:
