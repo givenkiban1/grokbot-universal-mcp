@@ -2,6 +2,7 @@
   "name": "grok-bot-universal",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Hosted two-way bridge between Claude and GrokBot bots: MCP server, bot reply API, and a dashboard.",
   "type": "module",
   "engines": {

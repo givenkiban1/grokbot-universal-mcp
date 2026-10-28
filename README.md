@@ -227,3 +227,7 @@ To run locally: `DATABASE_URL=… PUBLIC_URL=http://127.0.0.1:8787 ENCRYPTION_KE
 | Bot's reply gets `401` | The thread token expired (14 days) or the bot's reply token was rotated |
 | `421 Misdirected request` | `PUBLIC_URL` doesn't match the hostname you're using |
 | Connector won't connect | Check `PUBLIC_URL` is the exact public `https://` address, and the tunnel's public hostname points to `app:8787` |
+
+## License
+
+[MIT](LICENSE)
